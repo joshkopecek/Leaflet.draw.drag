@@ -119,6 +119,10 @@ L.Path.include({
  */
 L.Handler.PathDrag = L.Handler.extend( /** @lends  L.Path.Drag.prototype */ {
 
+  statics: {
+    DRAGGABLE_CLS: 'leaflet-path-draggable'
+  },
+
   /**
    * @param  {L.Path} path
    * @constructor
@@ -145,45 +149,92 @@ L.Handler.PathDrag = L.Handler.extend( /** @lends  L.Path.Drag.prototype */ {
      */
     this._dragStartPoint = null;
 
+    /**
+     * @type {Boolean}
+     */
+    this._dragInProgress = false;
+
+    /**
+     * @type {Boolean}
+     */
+    this._dragMoved = false;
+
   },
+
 
   /**
    * Enable dragging
    */
   addHooks: function() {
+    var className = L.Handler.PathDrag.DRAGGABLE_CLS;
+    var path      = this._path._path;
+
     this._path.on('mousedown', this._onDragStart, this);
-    L.DomUtil.addClass(this._path._container, 'leaflet-path-draggable');
+    this._path.options.className =
+      (this._path.options.className || '') + ' ' + className;
+
+    if (!L.Path.CANVAS && path) {
+      L.DomUtil.addClass(path, className);
+    }
   },
+
 
   /**
    * Disable dragging
    */
   removeHooks: function() {
+    var className = L.Handler.PathDrag.DRAGGABLE_CLS;
+    var path      = this._path._path;
+
     this._path.off('mousedown', this._onDragStart, this);
-    L.DomUtil.removeClass(this._path._container, 'leaflet-path-draggable');
+    this._path.options.className =
+      (this._path.options.className || '').replace(className, '');
+
+    if (!L.Path.CANVAS && path) {
+      L.DomUtil.removeClass(path, className);
+    }
+    this._dragMoved = false;
   },
+
 
   /**
    * @return {Boolean}
    */
   moved: function() {
-    return this._path._dragMoved;
+    return this._dragMoved;
   },
+
+
+  /**
+   * If dragging currently in progress.
+   *
+   * @return {Boolean}
+   */
+  inProgress: function() {
+    return this._dragInProgress;
+  },
+
 
   /**
    * Start drag
    * @param  {L.MouseEvent} evt
    */
   _onDragStart: function(evt) {
+    this._dragInProgress = true;
     this._startPoint = evt.containerPoint.clone();
     this._dragStartPoint = evt.containerPoint.clone();
     this._matrix = [1, 0, 0, 1, 0, 0];
 
+    if(this._path._point) {
+      this._point = this._path._point.clone();
+    }
+
     this._path._map
       .on('mousemove', this._onDrag, this)
       .on('mouseup', this._onDragEnd, this)
-    this._path._dragMoved = false;
+    this._dragMoved = false;
   },
+
 
   /**
    * Dragging
@@ -193,24 +244,40 @@ L.Handler.PathDrag = L.Handler.extend( /** @lends  L.Path.Drag.prototype */ {
     var x = evt.containerPoint.x;
     var y = evt.containerPoint.y;
 
-    var dx = x - this._startPoint.x;
-    var dy = y - this._startPoint.y;
+    var matrix     = this._matrix;
+    var path       = this._path;
+    var startPoint = this._startPoint;
 
-    if (!this._path._dragMoved && (dx || dy)) {
-      this._path._dragMoved = true;
-      this._path.fire('dragstart');
+    var dx = x - startPoint.x;
+    var dy = y - startPoint.y;
+
+    if (!this._dragMoved && (dx || dy)) {
+      this._dragMoved = true;
+      path.fire('dragstart');
+
+      if (path._popup) {
+        path._popup._close();
+        path.off('click', path._openPopup, path);
+      }
     }
 
-    this._matrix[4] += dx;
-    this._matrix[5] += dy;
+    matrix[4] += dx;
+    matrix[5] += dy;
 
-    this._startPoint.x = x;
-    this._startPoint.y = y;
+    startPoint.x = x;
+    startPoint.y = y;
 
-    this._path._applyTransform(this._matrix);
-    this._path.fire('drag');
+    path._applyTransform(matrix);
+
+    if (path._point) { // L.Circle, L.CircleMarker
+      path._point.x = this._point.x + matrix[4];
+      path._point.y = this._point.y + matrix[5];
+    }
+
+    path.fire('drag');
     L.DomEvent.stop(evt.originalEvent);
   },
+
 
   /**
    * Dragging stopped, apply
@@ -218,6 +285,9 @@ L.Handler.PathDrag = L.Handler.extend( /** @lends  L.Path.Drag.prototype */ {
    */
   _onDragEnd: function(evt) {
     L.DomEvent.stop(evt);
+    L.DomEvent._fakeStop({ type: 'click' });
+
+    this._dragInProgress = false;
     // undo container transform
     this._path._resetTransform();
     // apply matrix
@@ -234,11 +304,41 @@ L.Handler.PathDrag = L.Handler.extend( /** @lends  L.Path.Drag.prototype */ {
       )
     });
 
+    if (this._path._popup) {
+      L.Util.requestAnimFrame(function() {
+        this._path.on('click', this._path._openPopup, this._path);
+      }, this);
+    }
+
     this._matrix = null;
     this._startPoint = null;
+    this._point = null;
     this._dragStartPoint = null;
-    this._path._dragMoved = false;
   },
+
+
+  /**
+   * Transforms point according to the provided transformation matrix.
+   *
+   *  @param {Array.<Number>} matrix
+   *  @param {L.LatLng} point
+   */
+  _transformPoint: function(point, matrix) {
+    var path = this._path;
+
+    var px = L.point(matrix[4], matrix[5]);
+
+    var crs = path._map.options.crs;
+    var transformation = crs.transformation;
+    var scale = crs.scale(path._map.getZoom());
+    var projection = crs.projection;
+
+    var diff = transformation.untransform(px, scale)
+      .subtract(transformation.untransform(L.point(0, 0), scale));
+
+    return projection.unproject(projection.project(point)._add(diff));
+  },
+
 
   /**
    * Applies transformation, does it in one sweep for performance,
@@ -269,7 +369,7 @@ L.Handler.PathDrag = L.Handler.extend( /** @lends  L.Path.Drag.prototype */ {
     if (path._point) { // L.Circle
       path._latlng = projection.unproject(
         projection.project(path._latlng)._add(diff));
-      path._point._add(px);
+      path._point = this._point._add(px);
     } else if (path._originalPoints) { // everything else
       for (i = 0, len = path._originalPoints.length; i < len; i++) {
         latlng = path._latlngs[i];
@@ -298,10 +398,9 @@ L.Handler.PathDrag = L.Handler.extend( /** @lends  L.Path.Drag.prototype */ {
 
 });
 
-L.Path.prototype.__initEvents = L.Path.prototype._initEvents;
-L.Path.prototype._initEvents = function() {
-  this.__initEvents();
 
+// Init hook instead of replacing the `initEvents`
+L.Path.addInitHook(function() {
   if (this.options.draggable) {
     if (this.dragging) {
       this.dragging.enable();
@@ -311,6 +410,39 @@ L.Path.prototype._initEvents = function() {
     }
   } else if (this.dragging) {
     this.dragging.disable();
+  }
+});
+
+/*
+ * Return transformed points in case if dragging is enabled and in progress,
+ * otherwise - call original method.
+ *
+ * For L.Circle and L.Polyline
+ */
+
+// don't like this? me neither, but I like it even less
+// when the original methods are not exposed
+L.Circle.prototype._getLatLng = L.Circle.prototype.getLatLng;
+L.Circle.prototype.getLatLng = function() {
+  if (this.dragging && this.dragging.inProgress()) {
+    return this.dragging._transformPoint(this._latlng, this.dragging._matrix);
+  } else {
+    return this._getLatLng();
+  }
+};
+
+
+L.Polyline.prototype._getLatLngs = L.Polyline.prototype.getLatLngs;
+L.Polyline.prototype.getLatLngs = function() {
+  if (this.dragging && this.dragging.inProgress()) {
+    var matrix = this.dragging._matrix;
+    var points = this._getLatLngs();
+    for (var i = 0, len = points.length; i < len; i++) {
+      points[i] = this.dragging._transformPoint(points[i], matrix);
+    }
+    return points;
+  } else {
+    return this._getLatLngs();
   }
 };
 (function() {
@@ -390,14 +522,15 @@ L.Path.prototype._initEvents = function() {
 })();
 // TODO: dismiss that on Leaflet 0.8.x release
 
-L.Polygon.include( /** @lends L.Polygon.prototype */ {
+L.Polygon.include( L.Polygon.prototype.getCenter ? {} :
+  /** @lends L.Polygon.prototype */ {
 
   /**
    * @return {L.LatLng}
    */
   getCenter: function() {
-    var i, j, len, p1, p2, f, area, x, y,
-      points = this._parts[0];
+    var i, j, len, p1, p2, f, area, x, y;
+    var points = this._originalPoints;
 
     // polygon centroid algorithm; only uses the first ring if there are multiple
 
@@ -538,6 +671,8 @@ L.Edit.Circle.include( /** @lends L.Edit.Circle.prototype */ {
     this._shape.setRadius(radius);
 
     this._updateMoveMarker();
+
+    this._map.fire('draw:editresize', {layer: this._shape});
   },
 
   /**
@@ -627,6 +762,8 @@ L.Edit.Rectangle.include( /** @lends L.Edit.Rectangle.prototype */ {
     // this corner and the opposite point
     this._shape.setBounds(L.latLngBounds(latlng, this._oppositeCorner));
     this._updateMoveMarker();
+    
+    this._map.fire('draw:editresize', {layer: this._shape});
   },
 
   /**
