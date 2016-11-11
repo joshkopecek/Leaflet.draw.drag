@@ -21,7 +21,9 @@ var drawControl = new L.Control.Draw({
   edit: {
     featureGroup: drawnItems
     edit: {
-      moveMarkers: false // centroids, default: false
+      selectedPathOptions: {
+        moveMarkers: false // centroids, default: false
+      }
     }
   }
 });
